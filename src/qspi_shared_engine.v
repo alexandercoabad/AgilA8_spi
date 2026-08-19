@@ -2,12 +2,14 @@
 
 // One shared physical SPI shift engine (SCK/MOSI/MISO + 40-bit shift
 // register) driving three front-ends: flash (CS0), PSRAM (CS1), and a
-// generic SPI peripheral (CS2). Replaces qspi_flash_reader.v +
-// qspi_psram_ctrl.v + spi_ctrl.v as three separate, near-identical FSMs
-// (each ~78/78/40 flip-flops) with one shared engine (~85 flip-flops)
-// plus three thin front-ends (~15-20 flip-flops each for their own
-// request-latching and, for spi_ctrl, its CTRL register and persistent
-// last-received-byte latch).
+// generic SPI peripheral (CS2 - requires cutting the RAM B trace on the
+// Pmod first; see spi_ctrl.v's header for the board modification this
+// depends on). Replaces qspi_flash_reader.v + qspi_psram_ctrl.v +
+// spi_ctrl.v as three separate, near-identical FSMs (each ~78/78/40
+// flip-flops) with one shared engine (~85 flip-flops) plus three thin
+// front-ends (~15-20 flip-flops each for their own request-latching and,
+// for spi_ctrl, its CTRL register and persistent last-received-byte
+// latch).
 //
 // SAFE TO SHARE, NOT REAL ARBITRATION: this relies entirely on
 // a8_core's own invariant that imem_valid and dmem_valid are never both
@@ -43,6 +45,7 @@
 // the same zero-margin exposure flash/PSRAM were fixed for. This is a
 // deliberate, disclosed behavior change made possible by the merge,
 // not an incidental side effect.
+
 
 module qspi_shared_engine #(
     parameter HALF_PERIOD_CYCLES = 1,   // fixed half-period for flash/PSRAM

@@ -1,14 +1,34 @@
 `default_nettype none
 
-// General-purpose SPI master, for driving an external SPI slave device
-// (an LCD, an ADC, another MCU, etc) - NOT for the flash/PSRAM memory
-// devices, which already have their own dedicated controllers.
+// General-purpose SPI master, INTENDED for driving an external SPI slave
+// device (an LCD, an ADC, another MCU, etc) - NOT for the flash/PSRAM
+// memory devices, which already have their own dedicated controllers.
+//
+// *** REQUIRES ONE BOARD MODIFICATION - READ BEFORE USING ***
+// On the stock Tiny Tapeout QSPI Pmod, CS2 is wired directly to a real,
+// populated second PSRAM chip ("RAM B") - not to an external connector
+// pin. This peripheral only works once that chip is disabled: per the
+// Pmod's own documentation (github.com/mole99/qspi-pmod), each of the
+// three chip-select traces can be cut on the back of the board, at
+// which point a 1k pull-up disables that chip and the pad becomes
+// available via a through-hole header pin as a plain input or output.
+// Cutting CS2's trace specifically disables RAM B and frees exactly the
+// pin this module needs - this is a documented, intended modification
+// on the board as sold, not a custom PCB respin. Flash (CS0) and RAM A
+// (CS1) are untouched by this cut, so IMEM/DMEM keep working normally.
+//
+// Until that trace is cut, this module is functionally inert: CS2
+// still selects the live RAM B chip, so every "external" SPI transfer
+// this module issues actually talks to that PSRAM using the wrong
+// command protocol, and reaches no external device. The RTL itself
+// doesn't change based on whether the trace is cut - the requirement is
+// physical, not something firmware can work around.
 //
 // Shares the same physical SD0 (MOSI) / SD1 (MISO) / SCK lines as
 // qspi_flash_reader and qspi_psram_ctrl (see tt_um_agila8.v - there are
-// no free physical pins left for a genuinely separate bus), using the
-// previously-unused CS2 line ("RAM B", never actually populated on the
-// real QSPI Pmod) as this peripheral's own chip select.
+// no free physical pins left for a genuinely separate bus), using CS2
+// as this peripheral's own dedicated chip select once the cut above has
+// been made.
 //
 // CS is auto-managed per transfer (asserted only during the active 8-bit
 // shift, deasserted otherwise) - the same pattern qspi_flash_reader.v and
@@ -61,6 +81,7 @@
 //                     11 = ~sys_clk/128 (reset default - start slow,
 //                          let software speed up once the attached
 //                          device is known to tolerate it)
+
 
 module spi_ctrl (
     input  wire       clk,

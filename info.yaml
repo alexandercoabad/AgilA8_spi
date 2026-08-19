@@ -57,8 +57,8 @@ pinout:
   uio[3]: "Pmod SCK (shared flash/PSRAM)"
   uio[4]: "Pmod SD2 (held high, unused)"
   uio[5]: "Pmod SD3 (held high, unused)"
-  uio[6]: "Pmod CS1 (RAM A select - DMEM)"
-  uio[7]: "Pmod CS2 (RAM B, held high/deselected, unused)"
+  uio[6]: "Pmod CS1 (RAM A CS) "
+  uio[7]: "Pmod CS2 SPI CS (general-purpose SPI)"
 
 # Do not change!
 yaml_version: 6

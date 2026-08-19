@@ -7,6 +7,7 @@ You can also include images in this folder and reference them in the markdown. E
 512 kb in size, and the combined size of all images must be less than 1 MB.
 -->
 
+
 ## How it works
 
 AgilA8 is a compact 8-bit microcontroller built around A8, a custom
@@ -17,18 +18,31 @@ Both instruction and data memory live off-chip on the Tiny Tapeout QSPI
 Pmod. Program code is fetched from external SPI flash (CS0) using a
 standard `03h` Read Data command; data memory lives on one of the
 Pmod's two PSRAM chips (RAM A / CS1) using standard `02h`/`03h`
-Write/Read commands. A third front-end, a general-purpose SPI master
-for driving an external device (an LCD, an ADC, another MCU - anything
-that isn't the flash/PSRAM already covered), shares the same physical
-lines using the Pmod's previously-unused CS2 ("RAM B", never actually
-populated on the real Pmod). This keeps the on-chip design small enough
-to fit a 1x2 tile budget - Tiny Tapeout's own RAM32 macro is *half* the
-size of this design's DMEM and needs 3x2 tiles on its own, so a plain
-on-chip flip-flop array was never going to fit. Only plain, single-line
-SPI commands are used for flash/PSRAM - deliberately not flash's
+Write/Read commands. This keeps the on-chip design small enough to fit
+a 1x2 tile budget - Tiny Tapeout's own RAM32 macro is *half* the size of
+this design's DMEM and needs 3x2 tiles on its own, so a plain on-chip
+flip-flop array was never going to fit. Only plain, single-line SPI
+commands are used for flash/PSRAM - deliberately not flash's
 continuous-read mode or PSRAM's QPI mode, both of which need a
 mode-byte/setup sequence that's easy to get subtly wrong without
 hardware to verify against.
+
+A third front-end, a general-purpose SPI master intended for driving an
+external device (an LCD, an ADC, another MCU), shares the same physical
+lines using CS2. **This requires one board modification first**: on the
+stock QSPI Pmod, CS2 ("RAM B") is wired directly to a second, populated
+PSRAM chip, not out to any external connector pin. Per the Pmod's own
+documentation ([mole99/qspi-pmod](https://github.com/mole99/qspi-pmod)),
+each of its three chip-select traces can be cut on the back of the
+board - doing so for CS2 disables that second PSRAM chip (a 1k pull-up
+holds its `/CS` disabled) and makes the pad available via a through-hole
+header pin as a plain input or output. That's a documented, intended
+modification on the board as sold, not a custom respin - and it leaves
+flash (CS0) and RAM A (CS1) untouched, so IMEM/DMEM are unaffected.
+Until that trace is cut, this peripheral is functionally inert: CS2
+still selects the live RAM B chip, so its transfers just talk to that
+PSRAM with the wrong command protocol rather than reaching any external
+device. See `spi_ctrl.v`'s header for the full explanation.
 
 All three front-ends (flash, PSRAM, and the general-purpose SPI
 controller) are driven by one shared SPI shift engine rather than three
@@ -50,7 +64,7 @@ by construction, at most one of the three is ever requesting at once.
 | -------------- | --------------------------------------- |
 | 0x00 - 0xEF, 0xF5 - 0xF7 | RAM (external PSRAM, RAM A)   |
 | 0xF0 - 0xF2    | GPIO                                    |
-| 0xF3 - 0xF4    | SPI (general-purpose)                   |
+| 0xF3 - 0xF4    | SPI (general-purpose - requires a board mod, see below) |
 | 0xF8 - 0xFB    | Timer                                   |
 | 0xFC - 0xFD    | PWM                                     |
 
@@ -58,6 +72,10 @@ by construction, at most one of the three is ever requesting at once.
 > this design. They now belong to the general-purpose SPI controller
 > (see below) - any program that stored ordinary data at those two
 > addresses will now silently hit the SPI controller instead of RAM.
+> That controller only reaches an external device once the QSPI Pmod's
+> RAM B chip-select trace has been cut (see "How it works" below) - on
+> an unmodified board, writes there are functional but only reach the
+> still-populated internal PSRAM chip, not anything external.
 
 Instructions are fetched separately, as two consecutive bytes from
 external flash (big-endian: high byte at PC, low byte at PC+1) - flash
@@ -74,7 +92,7 @@ isn't part of the 8-bit DMEM address space above.
 | 4 | GPIO in 4   | GPIO out 4   | SD2 (held high, unused)           |
 | 5 | GPIO in 5   | GPIO out 5   | SD3 (held high, unused)           |
 | 6 | GPIO in 6   | GPIO out 6   | RAM A CS (CS1)                    |
-| 7 | GPIO in 7   | PWM output   | SPI CS (CS2, general-purpose SPI)  |
+| 7 | GPIO in 7   | PWM output   | SPI CS (CS2, general-purpose SPI - requires cutting the RAM B trace first, see below) |
 
 
 #### GPIO
@@ -89,12 +107,33 @@ isn't part of the 8-bit DMEM address space above.
 `0xAA` to GPIO_OUT reads back as `0xAA` internally, but only
 `uo_out[6:0]` (`0x2A` in that example) reaches a physical pin.
 
-#### SPI (general-purpose)
+#### SPI (general-purpose) - requires a board modification first
 
-A separate SPI master for driving an external device that isn't the
-flash/PSRAM already covered above (an LCD, an ADC, another MCU, etc.),
-using CS2 - the Pmod's second PSRAM chip-select, never actually
-populated on the real board.
+This peripheral's register interface (`SPI_DATA`/`SPI_CTRL` below) is
+correct SPI-master logic, but **it needs one physical modification to
+the QSPI Pmod before it can reach anything external**. On the stock
+board, CS2 ("RAM B") is wired directly to a second, populated PSRAM
+chip - using this peripheral as-is just sends SPI traffic to that real
+PSRAM using the wrong command set, and reaches no external device.
+
+Per the Pmod's own documentation
+([mole99/qspi-pmod](https://github.com/mole99/qspi-pmod)): each of the
+three chip-select traces on the board can be cut, on the back of the
+PCB, to disable that chip - a 1k pull-up then holds its `/CS` disabled,
+and the pad becomes available via a through-hole header pin as a plain
+input or output. Cutting **CS2's** trace specifically disables RAM B
+and frees exactly the pin this peripheral needs - flash (CS0) and RAM A
+(CS1) are untouched, so IMEM/DMEM keep working normally. This is a
+documented, intended modification on the board as sold, not a custom
+PCB respin.
+
+Until that cut is made, treat this peripheral as inert. If you don't
+want to modify the board (or just want the simplest path for something
+like an e-paper display, which is slow enough that bit-banging is a
+non-issue), drive the external device over the GPIO pins in software
+instead - `uo_out[6:0]` and `ui_in[7:0]` are on a separate header from
+the QSPI Pmod's `uio` bus entirely, so they aren't affected by any of
+the above either way.
 
 | Register | Address     | Description                                                        |
 | -------- | ----------- | -------------------------------------------------------------------- |
@@ -154,12 +193,19 @@ Tiny Tapeout FPGA Development Kit + QSPI Pmod path used for that.
 ## External hardware
 
 - [Tiny Tapeout QSPI Pmod](https://store.tinytapeout.com/products/QSPI-Pmod-p716541602),
-  plugged into the demoboard's bidirectional Pmod header. One flash chip
-  (program memory) and one of its two PSRAM chips (data memory) are
-  used; the second PSRAM chip's chip-select (CS2) is repurposed for the
-  general-purpose SPI controller instead - that chip itself is still
-  unpopulated on the real Pmod, but its CS line now carries traffic for
-  whatever external SPI device gets connected there.
+  plugged into the demoboard's bidirectional Pmod header. The flash chip
+  (program memory) and one of the two PSRAM chips (RAM A, data memory)
+  are used as designed. The second PSRAM chip (RAM B / CS2) needs its
+  chip-select trace cut on the back of the Pmod PCB (documented,
+  intended modification - see
+  [mole99/qspi-pmod](https://github.com/mole99/qspi-pmod)) before the
+  general-purpose SPI peripheral can drive an external device through
+  it; on an unmodified board that peripheral just talks to the
+  still-populated RAM B chip instead of anything external.
+- Without that modification, drive an external SPI device (e.g. an
+  e-paper display) over the separate `ui_in`/`uo_out` GPIO header
+  instead, bit-banging the protocol in software - that header is
+  independent of the QSPI Pmod's `uio` bus and works either way.
 - Tiny Tapeout demoboard, or the
   [FPGA Development Kit](https://store.tinytapeout.com/products/FPGA-Development-Kit-p813805747)
   for pre-tapeout bring-up on real silicon-adjacent hardware.

@@ -14,33 +14,50 @@ AgilA8 is a compact 8-bit microcontroller built around A8, a custom
 timer, and PWM generation.
 
 Both instruction and data memory live off-chip on the Tiny Tapeout QSPI
-Pmod, sharing its SD0/SD1/SCK lines between two separate chip selects.
-This keeps the on-chip design small enough to fit a 1x2 tile budget -
-Tiny Tapeout's own RAM32 macro is *half* the size of this design's DMEM
-and needs 3x2 tiles on its own, so a plain on-chip flip-flop array was
-never going to fit. Program code is fetched from external SPI flash
-(CS0) using a standard `03h` Read Data command; data memory lives on one
-of the Pmod's two PSRAM chips (RAM A / CS1) using standard `02h`/`03h`
-Write/Read commands. Only plain, single-line SPI commands are used -
-deliberately not flash's continuous-read mode or PSRAM's QPI mode, both
-of which need a mode-byte/setup sequence that's easy to get subtly wrong
-without hardware to verify against.
+Pmod. Program code is fetched from external SPI flash (CS0) using a
+standard `03h` Read Data command; data memory lives on one of the
+Pmod's two PSRAM chips (RAM A / CS1) using standard `02h`/`03h`
+Write/Read commands. A third front-end, a general-purpose SPI master
+for driving an external device (an LCD, an ADC, another MCU - anything
+that isn't the flash/PSRAM already covered), shares the same physical
+lines using the Pmod's previously-unused CS2 ("RAM B", never actually
+populated on the real Pmod). This keeps the on-chip design small enough
+to fit a 1x2 tile budget - Tiny Tapeout's own RAM32 macro is *half* the
+size of this design's DMEM and needs 3x2 tiles on its own, so a plain
+on-chip flip-flop array was never going to fit. Only plain, single-line
+SPI commands are used for flash/PSRAM - deliberately not flash's
+continuous-read mode or PSRAM's QPI mode, both of which need a
+mode-byte/setup sequence that's easy to get subtly wrong without
+hardware to verify against.
+
+All three front-ends (flash, PSRAM, and the general-purpose SPI
+controller) are driven by one shared SPI shift engine rather than three
+separate FSMs, since they're never active at the same time (see below)
+and consolidating saves real area - roughly 85 flip-flops for the
+shared engine plus three thin front-ends, versus about 196 flip-flops
+for three independent controllers.
 
 Because `imem_valid` and `dmem_valid` are never asserted in the same
 cycle (fetch and memory-access are separate, sequential states in the
-core's FSM), the flash and PSRAM controllers can share the SD0/SD1/SCK
-lines through a simple mux rather than needing real bus arbitration.
-The Pmod's second PSRAM chip (RAM B / CS2) is left deselected and
-unused - the DMEM window doesn't need it.
+core's FSM), and the DMEM-side peripherals are mutually exclusive by
+address decode, the shared engine can grant flash/PSRAM/SPI with a
+simple fixed-priority mux rather than needing real bus arbitration -
+by construction, at most one of the three is ever requesting at once.
 
 ### Address map
 
 | Address range | Device                                  |
 | -------------- | --------------------------------------- |
-| 0x00 - 0xEF, 0xF3 - 0xF7 | RAM (external PSRAM, RAM A)   |
+| 0x00 - 0xEF, 0xF5 - 0xF7 | RAM (external PSRAM, RAM A)   |
 | 0xF0 - 0xF2    | GPIO                                    |
+| 0xF3 - 0xF4    | SPI (general-purpose)                   |
 | 0xF8 - 0xFB    | Timer                                   |
 | 0xFC - 0xFD    | PWM                                     |
+
+> **Note:** `0xF3`/`0xF4` used to be plain RAM in earlier revisions of
+> this design. They now belong to the general-purpose SPI controller
+> (see below) - any program that stored ordinary data at those two
+> addresses will now silently hit the SPI controller instead of RAM.
 
 Instructions are fetched separately, as two consecutive bytes from
 external flash (big-endian: high byte at PC, low byte at PC+1) - flash
@@ -57,7 +74,8 @@ isn't part of the 8-bit DMEM address space above.
 | 4 | GPIO in 4   | GPIO out 4   | SD2 (held high, unused)           |
 | 5 | GPIO in 5   | GPIO out 5   | SD3 (held high, unused)           |
 | 6 | GPIO in 6   | GPIO out 6   | RAM A CS (CS1)                    |
-| 7 | GPIO in 7   | PWM output   | RAM B CS (CS2, held high, unused) |
+| 7 | GPIO in 7   | PWM output   | SPI CS (CS2, general-purpose SPI)  |
+
 
 #### GPIO
 
@@ -70,6 +88,31 @@ isn't part of the 8-bit DMEM address space above.
 `uo_out[7]` is dedicated to the PWM output, not GPIO - a write of
 `0xAA` to GPIO_OUT reads back as `0xAA` internally, but only
 `uo_out[6:0]` (`0x2A` in that example) reaches a physical pin.
+
+#### SPI (general-purpose)
+
+A separate SPI master for driving an external device that isn't the
+flash/PSRAM already covered above (an LCD, an ADC, another MCU, etc.),
+using CS2 - the Pmod's second PSRAM chip-select, never actually
+populated on the real board.
+
+| Register | Address     | Description                                                        |
+| -------- | ----------- | -------------------------------------------------------------------- |
+| SPI_DATA | 0xF3 (R/W)  | Write: shifts the byte out (CS auto-asserted for the transfer, **blocking** until the 8-bit transfer physically completes). Read: returns the byte simultaneously shifted in from MISO during the most recent transfer, without starting a new one - to read a byte from a slave, write a dummy `0x00` and then read DATA back (standard full-duplex SPI) |
+| SPI_CTRL | 0xF4 (R/W)  | Bits[1:0] = SCK clock divider: `00` = fastest (~sys_clk/2, matches flash/PSRAM speed), `01` = ~sys_clk/8, `10` = ~sys_clk/32, `11` = ~sys_clk/128 (**reset default** - start slow, let software speed up once the attached device's timing is known to tolerate it) |
+
+Each `SPI_DATA` write is deliberately blocking rather than
+fire-and-forget: the core has no instruction cache, so the very next
+instruction fetch also needs this same shared bus. Blocking keeps this
+peripheral's transfers inside the same single-active-transaction
+invariant the shared engine already depends on for flash/PSRAM, with no
+separate arbitration hardware needed. CS is likewise auto-pulsed per
+byte (asserted only during the active transfer) rather than held low
+across a logical multi-byte burst - genuinely continuous bursts aren't
+possible on this hardware anyway, since unrelated flash-fetch traffic
+would otherwise appear on the shared lines mid-burst; auto-pulsing at
+least keeps CS deasserted while that happens, so the attached device
+correctly ignores it.
 
 #### Timer
 
@@ -103,7 +146,7 @@ isn't part of the 8-bit DMEM address space above.
    last verified against.
 
 Before committing to a tapeout, the QSPI Pmod flash-read timing margin
-(`read_delay_cfg` in `qspi_flash_reader.v` / `qspi_psram_ctrl.v`) is
+(`read_delay_cfg`, now handled centrally in `qspi_shared_engine.v`) is
 worth validating on real hardware first, since interconnect delay isn't
 visible in behavioral simulation - see the FPGA bring-up guide for the
 Tiny Tapeout FPGA Development Kit + QSPI Pmod path used for that.
@@ -113,7 +156,10 @@ Tiny Tapeout FPGA Development Kit + QSPI Pmod path used for that.
 - [Tiny Tapeout QSPI Pmod](https://store.tinytapeout.com/products/QSPI-Pmod-p716541602),
   plugged into the demoboard's bidirectional Pmod header. One flash chip
   (program memory) and one of its two PSRAM chips (data memory) are
-  used; the second PSRAM chip is unused.
+  used; the second PSRAM chip's chip-select (CS2) is repurposed for the
+  general-purpose SPI controller instead - that chip itself is still
+  unpopulated on the real Pmod, but its CS line now carries traffic for
+  whatever external SPI device gets connected there.
 - Tiny Tapeout demoboard, or the
   [FPGA Development Kit](https://store.tinytapeout.com/products/FPGA-Development-Kit-p813805747)
   for pre-tapeout bring-up on real silicon-adjacent hardware.
